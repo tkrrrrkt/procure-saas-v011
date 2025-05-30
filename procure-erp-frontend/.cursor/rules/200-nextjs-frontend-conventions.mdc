@@ -1,0 +1,36 @@
+---
+description: Next.jsフロントエンド開発におけるコンポーネント指向、SSG/SSR/CSR、データフェッチ、フォームハンドリング、認証状態管理、UI/UX、国際化に関するガイドライン。
+globs: ["src/**/*.tsx", "src/**/*.ts"] # Next.jsフロントエンドのソースファイルに適用 [cite: 36]
+type: AutoAttached # 該当ファイルが参照された場合に適用 [cite: 65]
+priority: 3
+tags: ["nextjs", "frontend", "react", "tailwindcss"]
+version: "1.0.0"
+---
+# Next.js フロントエンド規約
+
+## 2.2. フロントエンド (procure-erp-frontend)
+- **フレームワーク**: Next.js 15.2.4 (React, TypeScript) [cite: 5]
+- **言語**: TypeScript [cite: 5]
+- **UIライブラリ**: Radix UI（アクセシビリティを重視） [cite: 5]
+- **UIコンポーネント**: Shadcn UI (Radix UIのラッパーとして利用) [cite: 5]
+- **スタイリング**: Tailwind CSS (`tailwind.config.ts`, `app/globals.css`). [cite: 5]
+- **フォーム管理**: React Hook Form + Zod (スキーマバリデーション) [cite: 5]
+- **状態管理**: Zustand, React Context (AuthContext) を活用し、HTTPOnly Cookieベースの認証ポリシーに完全準拠すること。アクセストークンやリフレッシュトークンはストアに保存せず、HTTPOnly Cookieからの自動送信に依存する。 [cite: 5]
+- **HTTPクライアント**: Axios を使用。CSRFトークン管理 (`lib/api/csrf-manager.ts`)。AccessTokenの自動リフレッシュ機能をAxiosインターセプター内に実装すること。 [cite: 5]
+- **日付操作**: date-fns [cite: 5]
+- **ルーティング**: Next.js App Router (`app/` ディレクトリ構造) を遵守。 [cite: 5]
+- **ディレクトリ構造**: Next.jsの標準的なApp Router構造 (`app/`, `components/`, `lib/`, `hooks/`, `stores/`, `utils/`, `styles/` など) を遵守。 [cite: 5]
+
+## 3.3. フロントエンド (Next.js)
+- **コンポーネント指向**: 再利用可能なUIコンポーネント (`components/ui`) を積極的に使用し、Atomic Design原則を意識すること。Shadcn UIとRadix UIの組み合わせを最大限に活用すること。 [cite: 9]
+- **サーバーコンポーネント/クライアントコンポーネント**: Next.jsのServer ComponentsとClient Componentsの使い分けを理解し、パフォーマンス最適化とデータフェッチの効率化を考慮すること。 [cite: 9]
+- **データフェッチ**: Next.jsのデータフェッチパターン（Server Actions, Axios）を適切に選択すること。特にServer Actions (`app/ec-price-search/actions.ts` のようなファイル) を積極的に活用すること。 [cite: 9]
+- **フォームハンドリング**: `react-hook-form` や `zod` (`lib/validations`) を使用して、堅牢なフォームバリデーションを実装すること。 (`hooks/use-form.ts` を参照)。 [cite: 9]
+- **認証状態管理**: `AuthContext` (`contexts/AuthContext.tsx`) と `useAuth` ストア (`stores/authStore.ts`, `stores/useAuth.ts`) を使用して、アプリケーション全体の認証状態を一貫して管理すること。Zustand, Context API, ローカルステートが混在している箇所については、機能や責務に応じて最適な状態管理方法を選択し、一貫性のあるパターンを確立すること。HTTPOnly Cookieからの自動送信に依存するポリシーを厳守し、クライアントサイドJSでのJWTの直接操作（保存・読み込み）は行わない。 [cite: 9]
+- **UI/UX**: [cite: 9]
+    - 各ページのモックアップ (`app/*/page.tsx`) の意図を理解し、ユーザーエクスペリエンスを考慮した実装を行うこと。 [cite: 9]
+    - ローディング状態 (`loading.tsx`) の表示を適切に実装すること。 [cite: 9]
+    - レスポンシブデザインを常に考慮し、モバイルファーストの原則で設計・実装すること。`use-mobile.tsx` を活用し、各コンポーネントが様々な画面サイズに対応するように徹底すること。 [cite: 9]
+    - Radix UIのアクセシビリティ機能を最大限に活用し、WAI-ARIAガイドラインに基づいた適切な属性を付与することで、アクセシビリティを確保すること。 [cite: 9]
+- **ファイル構造**: Next.js App Routerの規約に従い、`app/` ディレクトリ配下のファイルは役割に応じて適切に配置すること。 [cite: 9]
+- **国際化（i18n）**: 将来的な多言語対応を見据え、国際化のための仕組み（例: `next-i18next` や `react-i18next` などのライブラリ導入）の検討を開始し、UIテキストや日付、通貨の表示が多言語に対応できるように設計方針を定めること。 [cite: 9]

@@ -1,0 +1,651 @@
+1. 開発準備とプロジェクト理解
+プロンプト1: プロジェクト分析と実装計画
+以下のエンタープライズ購買管理SaaSシステムにSSOを実装するプロジェクトを支援してください。
+【既存システム概要】
+
+バックエンド: NestJS + Prisma ORM + PostgreSQL
+フロントエンド: Next.js (App Router) + React + Tailwind CSS + Shadcn/ui
+認証: JWT + HttpOnly Cookieによるセキュアなトークン管理 (アクセストークン、リフレッシュトークン共にHttpOnly Cookieで管理)。フロントエンドはトークンをストアに保存せず、HTTPOnly Cookieからの自動送信に依存。
+フロントエンド認証状態管理: Zustand (stores/authStore.ts, useAuth.ts) および React Context (contexts/AuthContext.tsx) を利用。Axiosインターセプター (lib/api/axios.ts) でのトークン自動付与。
+ディレクトリ構造: [主要なディレクトリ構造の説明、または procure-erp-backend/ と procure-erp-frontend/ のルートディレクトリを明確に伝える]
+
+【実装するSSO機能の概要】
+
+OpenID Connect (OIDC)プロトコル を採用
+Azure AD を最優先対応（Azure ADサービス障害時のフォールバック認証方法も考慮）
+テナント（組織）ごとのSSO設定
+Just-in-Time (JIT) プロビジョニング (初回ログイン時にユーザーアカウントを自動作成)
+データベース変更: 既存の EmpAccount モデルを EmpAccount (社員情報) と LoginAccount (認証情報) に分離。
+リフレッシュトークンによるアクセストークンの自動リフレッシュ機能を実装。
+
+以下の既存ファイルの内容を詳細に確認し、実装計画を立ててください:
+
+procure-erp-backend/src/core/auth/auth.controller.ts
+procure-erp-backend/src/core/auth/auth.service.ts
+procure-erp-backend/prisma/schema.prisma
+procure-erp-frontend/stores/authStore.ts
+procure-erp-frontend/stores/useAuth.ts
+procure-erp-frontend/contexts/AuthContext.tsx
+procure-erp-frontend/lib/api/axios.ts
+procure-erp-frontend/utils/auth-utils.ts
+
+特に以下の点に注目してください:
+
+既存の認証フロー（HTTPOnly Cookieベース）との整合性
+既存のデータモデル (EmpAccount) への影響と、EmpAccount / LoginAccount分離の具体的な計画
+変更が必要な箇所と追加が必要な箇所
+
+【成果物】
+
+実装のためのステップバイステップ計画（バックエンド、フロントエンド、DB変更、データ移行を含む）
+各ステップの依存関係
+潜在的なリスクと対策案
+データベース分離と既存データ移行計画（別途スクリプト）
+
+2. データモデル変更
+プロンプト2: スキーマ変更設計
+SSO機能のためのPrismaスキーマ変更を実装してください。
+【既存スキーマ】
+以下が現在のEmpAccountモデルです:
+[ここに prisma/schema.prisma の EmpAccount モデル全体を貼り付け]
+【変更要件】
+
+EmpAccount からログイン情報を分離し、以下の新しいモデルを作成:
+
+LoginAccount: ユーザーのログイン（認証）情報と、認証方法ごとの詳細情報を保持。
+
+login_account_id (UUID, PK)
+emp_account_id (UUID, FK to EmpAccount.emp_account_id)
+method (Enum: LOCAL, SSO_AZURE_AD など)
+identifier (ログイン時の識別子。LOCALならメールアドレス、SSOならIdPからのsubクレーム)
+password_hash (LOCAL認証の場合のみ、文字長制限: VARCHAR(255))
+sso_subject_id (OIDCのsubクレーム、文字長制限: VARCHAR(255))
+sso_issuer (OIDCのIssuer URL、文字長制限: VARCHAR(255))
+sso_provider_metadata (JSON形式、プロバイダー固有のメタデータを保存)
+last_login (最終ログイン日時)
+login_count (ログイン回数、INTEGER)
+created_at (作成日時)
+updated_at (更新日時)
+MFA関連フィールド (mfa_enabled BOOLEAN, mfa_secret VARCHAR(255), mfa_backup_codes JSON - 後続で詳細定義)
+
+
+EmpAccount モデルの変更:
+
+password_hash, last_login フィールドを削除。
+email フィールドは社員の連絡先メールアドレスとして残し、@@unique([tenant_id, email]) 制約は解除する。
+LoginAccount への1対多のリレーションを追加 (loginAccounts LoginAccount[])。
+
+
+
+
+Organization モデルを拡張してSSO設定を追加:
+
+sso_enabled (Boolean)
+oidc_client_id (String?, VARCHAR(255))
+oidc_client_secret (String?, VARCHAR(255))
+oidc_issuer_url (String?, VARCHAR(255))
+oidc_redirect_uri (String?, VARCHAR(255))
+oidc_provider_type (Enum: AZURE_AD, GOOGLE, OKTA, etc.)
+JITプロビジョニング時のデフォルトロール (default_sso_role: String?)
+JITプロビジョニング設定 (jit_provisioning_enabled: Boolean)
+SSO強制設定 (sso_enforced: Boolean, trueの場合ローカル認証を無効化)
+フォールバック設定 (sso_fallback_enabled: Boolean, IdP障害時のローカル認証許可設定)
+
+
+AuditLog および Notification モデルの user_id を EmpAccount.emp_account_id を指すよう更新。
+新規Enum AuthMethod を定義する。
+
+【制約条件】
+
+既存のリレーションシップを維持すること。
+テナント分離を適切に実装すること。
+移行可能な設計にすること。
+データ型は既存のPostgreSQL定義に準拠し、@db.VarCharなど適切な指定を行うこと。
+ユニーク制約とインデックスは、提案されたLoginAccountの要件（(method, identifier) および (sso_subject_id, sso_issuer)）に従うこと。
+
+【成果物】
+
+更新された prisma/schema.prisma ファイル
+データ移行のためのPrismaマイグレーションスクリプト（スキーマ変更のみ）
+既存データを新構造に移行するためのTypeScript製データ移行スクリプト（別途実行）の設計案
+
+プロンプト3: データ移行スクリプト
+前のステップで設計した新しいスキーマに基づいて、既存のEmpAccountデータをEmpAccountとLoginAccountに移行するTypeScriptスクリプトを作成してください。
+【要件】
+
+トランザクション内で実行すること。
+既存の各EmpAccountレコードに対して、以下の処理を実行する:
+
+EmpAccountレコードの更新: 既存のemp_account_idをキーとして、password_hashおよびlast_loginフィールドを削除/null化する。
+LoginAccountレコードの作成:
+
+LoginAccount.method は AuthMethod.LOCAL とする。
+LoginAccount.identifier に既存の EmpAccount.email をコピーする。
+LoginAccount.password_hash に既存の EmpAccount.password_hash をコピーする。
+LoginAccount.last_login に既存の EmpAccount.last_login をコピーする。
+LoginAccount.emp_account_id に対応する既存の EmpAccount.emp_account_id を設定する。
+LoginAccount.sso_subject_id, sso_issuer, mfa_enabled, mfa_secret, mfa_backup_codes は初期値 (null/false) とする。
+LoginAccount.created_atは現在時刻、login_countは0として初期化する。
+
+
+
+
+データ整合性を確保するための検証ロジックを含める。
+EmpAccount.valid_flg は既存の値を維持する（新規作成の場合は'1'に設定）こと。
+EmpAccount.email は、既存の値をそのまま引き継ぎ、あくまで社員の連絡先メールアドレスとして扱うこと。LoginAccount.identifier は認証用識別子として別途管理される。
+メールアドレスが無効または欠落している場合は、LoginAccount.identifierをemp_account_cdなどの代替値で設定する。
+
+【注意点】
+
+エラー処理を徹底すること。
+大量データ処理を考慮したバッチ処理を実装すること（1,000件単位のバッチ処理を推奨）。
+ロールバックメカニズムを含めること。
+Prisma Clientを介してデータベースを操作するTypeScriptスクリプトとして記述すること。
+移行前後のEmpAccountsとLoginAccountsの件数を比較検証すること。
+
+【成果物】
+
+データ移行スクリプト (TypeScriptファイル、例: scripts/migrate-auth-data.ts)
+データ移行後のデータ整合性を検証するためのスクリプト
+
+3. バックエンド認証モジュール実装
+プロンプト4: 認証モジュールリファクタリング
+SSO対応のため、既存の認証モジュールをリファクタリングしてください。
+【既存コード】
+以下が現在の認証関連コードです:
+
+procure-erp-backend/src/core/auth/auth.module.ts
+procure-erp-backend/src/core/auth/auth.controller.ts
+procure-erp-backend/src/core/auth/auth.service.ts
+procure-erp-backend/src/core/auth/strategies/local.strategy.ts
+procure-erp-backend/src/core/auth/strategies/jwt.strategy.ts
+procure-erp-backend/src/core/auth/guards/local-auth.guard.ts
+procure-erp-backend/src/core/auth/guards/jwt-auth.guard.ts
+
+【リファクタリング要件】
+
+認証機能を以下のサブモジュールに分割:
+
+既存のローカル認証: src/core/auth/local/ ディレクトリに移動し、LocalAuthModule, LocalAuthController, LocalAuthService, LocalStrategy, LocalAuthGuard として再構築。
+JWTトークン管理: src/core/auth/token/ ディレクトリに移動し、JWTの生成、検証、Refresh Tokenの管理、HttpOnly Cookieへの設定/クリアに関するロジックをカプセル化する新しい TokenService を作成。このサービスは HttpOnlyCookieService（またはより適切な名前）とも連携し、Cookie操作を抽象化する。
+OpenID Connect (OIDC) 認証: src/core/auth/oidc/ ディレクトリに新しい OidcAuthModule を作成し、OIDC認証フロー全体を管理する。
+ユーザーサービス連携: UsersService (src/modules/users/users.service.ts) を拡張し、EmpAccountとLoginAccountの作成・検索・更新に関するメソッドを追加する。
+
+createEmpAccountAndLoginAccountForSso - SSOユーザー用の新規アカウント作成
+findLoginAccountBySsoSubjectIdAndIssuer - SSO IDによるログインアカウント検索
+findEmpAccountByLoginAccount - ログインアカウントから社員情報を取得
+linkLoginAccountToExistingEmpAccount - 既存社員に新規ログイン方法を追加
+getLoginMethodsForEmpAccount - 社員の利用可能な認証方法一覧取得
+
+
+
+
+既存の認証フロー（ローカル認証）は維持しつつ、SSO認証への拡張性を向上させる。
+新しいディレクトリ構造を以下のように整理:
+
+src/core/auth/controllers/
+src/core/auth/services/
+src/core/auth/strategies/
+src/core/auth/guards/
+src/core/auth/dto/
+src/core/auth/modules/ (LocalAuthModule, OidcAuthModuleなど、各サブモジュールのルート)
+src/core/auth/interfaces/ (認証関連の共通インターフェース)
+
+
+
+【制約条件】
+
+すべての既存エンドポイントと機能が正常に動作すること。
+コードの重複を最小限に抑えること。
+適切な依存性注入を使用すること。
+HttpOnly CookieによるJWTの保存と自動リフレッシュの基盤を、このリファクタリングで確立すること。
+ログアウト処理 (authApi.logout()) もHttpOnly Cookieのクリアとトークン無効化を適切に行うように強化する。
+IdP障害時のフォールバック認証を考慮した設計とすること。
+
+【成果物】
+
+リファクタリングされた認証モジュール構造 (ファイルパスリストと変更点概要)
+各コンポーネントの実装コード (AuthService, LocalAuthModule/Service/Controller, TokenServiceのドラフト)
+
+プロンプト5: OIDC認証サービス実装
+OpenID Connect (OIDC)認証を処理するサービスを実装してください。
+【要件】
+
+以下の機能を持つOidcServiceクラスを実装:
+
+OIDC認証URLの生成 (/auth/oidc/login?orgCode=your_org_code からのリダイレクト先URL)
+認証コードとトークン交換 (Authorization Code Grant Flow)
+IDトークン検証 (署名、発行者、有効期限、Nonce、Audienceの検証)
+JWKS (JSON Web Key Set)のキャッシュ機構（IdPへの過剰な公開鍵取得リクエストを防止）
+JITユーザープロビジョニング:
+
+Azure ADから受け取るクレーム (sub, email, nameなど) を基に、EmpAccountとLoginAccountのレコードを作成・更新するロジックを実装。
+EmpAccount.emp_nameにはnameクレームをマッピング。クレーム欠落時はemailまたはsubから導出。
+EmpAccount.emailにはemailクレームをマッピング。欠落時はnull許容または代替メールを生成。
+EmpAccount.emp_kana_nameとemp_account_cdはJITプロビジョニングでは設定せず、空またはnullとする。
+EmpAccount.roleには、対応するOrganizationモデルのdefault_sso_roleをマッピングする。
+EmpAccount.valid_flgは常に'1' (有効) とする。
+クレーム欠落時の代替戦略と、必須クレーム（最低限sub）の検証。
+既存のEmpAccountに紐づくLoginAccountが存在しない場合（例: ローカル認証ユーザーがSSOログインを初めて行う場合）、既存のEmpAccountに新しいLoginAccountを追加するロジックも考慮する。（メールアドレスでのマッチングなど）
+UsersServiceのメソッドを呼び出してデータベース操作を行う。
+
+
+
+
+Azure ADとの連携を優先する（passport-openidconnect設定時の考慮）。Azure AD特有の対応も含める。
+テナントごとに異なるSSO設定（Organizationモデルのoidc_client_id, oidc_client_secret, oidc_issuer_url, oidc_redirect_uriなど）を動的に取得・処理する。
+OIDC認証成功後、Access TokenとRefresh TokenをHttpOnly Cookieとして設定するためのロジックを実装（TokenServiceを利用）。
+IdP（Azure AD）障害時のフォールバック認証メカニズム（設定により有効/無効化可能）。
+
+【関連する既存コード】
+
+procure-erp-backend/src/core/auth/services/auth.service.ts (トークン管理の参考、および共通JWT生成メソッド)
+procure-erp-backend/src/core/database/prisma.service.ts (データアクセス)
+procure-erp-backend/src/modules/users/users.service.ts (JITプロビジョニングに使用)
+procure-erp-backend/src/config/config.module.ts (環境変数管理)
+procure-erp-backend/src/core/redis/redis.service.ts (Nonce, Stateの一時保存に利用)
+
+【注意点】
+
+トークン検証の厳格な実装（Nonce, State, azpクレームの検証など）。
+セキュリティベストプラクティスの適用。
+エラー処理と監査ログ記録。
+passport-openidconnect の Strategy が動的に設定されるようにすること。
+環境変数による設定（デフォルトのOIDC_CLIENT_ID, OIDC_CLIENT_SECRETなど）と、Organization単位の設定の適切な管理。
+JWKSキャッシュのTTL設定と失効管理（期限切れ、手動更新機能）。
+
+【成果物】
+
+src/core/auth/oidc/services/oidc.service.ts
+src/core/auth/oidc/services/jwks-cache.service.ts (JWKSキャッシュ専用サービス)
+関連するDTOとインターフェイス (OIDC認証レスポンスDTO, JITプロビジョニング用DTOなど)
+単体テスト
+
+プロンプト6: OIDC認証コントローラー実装
+
+OpenID Connect (OIDC)認証フローを処理するコントローラーを実装してください。
+【要件】
+1.  以下のエンドポイントを持つ`OidcController`を実装:
+    * `/auth/sso/check` (GET):
+        * クエリパラメータで`orgCode`を受け取る。
+        * バックエンドAPI (`/auth/sso/check?orgCode=xxx`) として機能し、フロントエンドが組織コードに基づいてSSOボタンを表示すべきかを判断するために、その組織のSSO有効状態（`Organization.sso_enabled`）を返す。
+    * `/auth/sso/login` (GET):
+        * クエリパラメータで`orgCode`を受け取る (`/auth/oidc/login?orgCode=your_org_code`)。
+        * `orgCode`から`Organization`のSSO設定（`oidc_client_id`, `oidc_client_secret`, `oidc_issuer_url`, `oidc_redirect_uri`など）を取得し、OIDC認証プロバイダへのリダイレクトURL（Authorization Endpoint）を生成する。
+        * 生成したURLへユーザーをリダイレクトさせる。
+        * `state`と`nonce`パラメーターを生成し、サーバー側でRedisなどの一時保存メカニズムを利用して保存し、コールバックでの検証を可能にする。
+    * `/auth/sso/callback` (GET/POST):
+        * OIDC認証プロバイダからのコールバック（認証コードとその他のパラメータ）を受け取る。
+        * クエリパラメータ（`code`, `state`など）を処理する。
+        * `state`と`nonce`の検証を行い、リプレイアタックやCSRF攻撃を防ぐ。
+        * 認証コードとトークン交換（Token Endpointへのリクエスト）を行い、IDトークンとアクセストークンを取得する。
+        * IDトークンを厳密に検証する（署名、発行者、有効期限、Audience、`azp`クレームの検証）。
+        * Just-in-Time (JIT) ユーザープロビジョニングを実行し、`EmpAccount`と`LoginAccount`を作成/更新する。
+        * アプリケーション独自のJWT（Access TokenとRefresh Token）を生成し、**HttpOnly, Secure, SameSite=Lax/Strict の属性を持つCookie**としてクライアントに設定する。
+        * 認証成功時はフロントエンドの `/dashboard` にリダイレクト（JWTはURLフラグメントとして渡す。例: `/dashboard#access_token=...`）。
+        * 認証失敗時はフロントエンドの `/login?error=sso_failed` にリダイレクトし、エラー情報を監査ログに詳細に記録する。
+2.  Swagger APIドキュメントの適切な注釈 (`@ApiTags`, `@ApiOperation`, `@ApiResponse`など) を含める。
+3.  エラーハンドリングと監査ログ（`AuditService`を利用し、認証成功/失敗の両方を詳細に記録する）。
+【既存の関連コード】
+- procure-erp-backend/src/core/auth/auth.controller.ts (既存の認証エンドポイント)
+- procure-erp-backend/src/common/services/audit-log.service.ts (監査ログ)
+- procure-erp-backend/src/core/auth/guards/jwt-auth.guard.ts (JWT認証ガードの参考)
+- procure-erp-backend/src/common/csrf/csrf.middleware.ts (CSRFミドルウェアの考慮)
+【注意点】
+- テナント分離の厳格な実装（`orgCode`に基づくSSO設定の取得と利用）。
+- セキュリティヘッダーの適切な設定。
+- **HTTPOnly Cookieの一貫した管理（JWTのSet-Cookieヘッダーでの設定）。**
+- リプレイアタックやCSRF攻撃に対する保護（`state`と`nonce`の厳格な検証）。
+【成果物】
+- `src/core/auth/oidc/controllers/oidc.controller.ts`
+- 関連するDTOとガード（OIDC認証ガードなど）
+- 統合テスト
+4. フロントエンド実装
+プロンプト7: ログイン画面のSSO対応
+既存のログイン画面をSSO対応に拡張してください。
+【既存コード】
+
+procure-erp-frontend/app/login/page.tsx
+procure-erp-frontend/components/ui/button.tsx
+procure-erp-frontend/components/ui/input.tsx
+procure-erp-frontend/lib/api/auth.ts (既存の認証APIラッパー)
+
+【要件】
+
+組織コード入力フィールドの追加:
+
+ユーザーが組織コード（例: your_org_code）を入力するインプットフィールドを設置。
+このフィールドはローカル認証フォームの上部または独立したセクションに配置する。
+入力時のバリデーション（英数字のみ、最大長さ制限など）を実装。
+
+
+組織コードに基づくSSO設定の動的な取得と表示:
+
+ユーザーが組織コードを入力・確定（または入力中に非同期で）した際、バックエンドAPI (/auth/sso/check?orgCode=xxx) を呼び出し、その組織のSSO有効状態を取得する。
+API呼び出し中はローディングインジケータを表示し、ユーザに処理中であることを示す。
+SSOが有効である場合のみ、「Microsoftアカウントでログイン」ボタンを表示する。
+SSOが有効でない、または組織コードが無効な場合は、適切なエラーメッセージを表示し、SSOボタンは非表示にする。
+
+
+SSOプロバイダー選択UI: 現状はAzure ADのみのため、シンプルに「Microsoftアカウントでログイン」ボタンとする。将来的な拡張性を考慮したコンポーネント構造とする。
+従来のログインフォームとの共存（並存または切り替え）。
+SSOログインボタンクリック時、バックエンドのSSO開始エンドポイント (/auth/oidc/login?orgCode=your_org_code) へユーザーをリダイレクトさせる。
+IdP障害時のフォールバック表示: 組織でsso_fallback_enabledが有効な場合、IdP障害時に/auth/sso/fallbackから帰還した際に代替ログインオプションを表示。
+
+【デザイン要件】
+
+モダンでユーザーフレンドリーなUI (Shadcn/uiのコンポーネントを最大限活用)。
+レスポンシブデザイン。
+適切なエラーフィードバック（組織コードの入力ミス、SSO設定エラーなど）。
+SSO設定確認中やリダイレクト中のローディング状態の表示（スピナーなど）。
+ローディング中はユーザーアクション（ボタンクリックなど）を無効化し、重複リクエストを防止。
+
+【成果物】
+
+更新された app/login/page.tsx コンポーネント
+必要なカスタムフックやヘルパー関数（例: useOrganizationSsoCheck）
+CSSスタイル (Tailwind CSS)
+
+プロンプト8: 認証状態管理の拡張
+
+既存の認証状態管理をSSO対応に拡張してください。
+【既存コード】
+- procure-erp-frontend/contexts/AuthContext.tsx
+- procure-erp-frontend/stores/authStore.ts
+- procure-erp-frontend/stores/useAuth.ts
+- procure-erp-frontend/lib/api/axios.ts (APIクライアント)
+- procure-erp-frontend/utils/auth-utils.ts (認証ユーティリティ)
+
+【要件】
+1.  **認証プロバイダー情報の追加**:
+    * `AuthContext`および`authStore`において、現在ログインしているユーザーがローカル認証かSSO認証（Azure AD）かを識別できる状態を追加する（例: `authMethod: 'LOCAL' | 'SSO_AZURE_AD'`）。
+    * `User`インターフェース（`authStore.ts`内）を拡張し、`EmpAccount`から得られる詳細なユーザープロファイル情報（例: `emp_account_id`, `tenant_id`, `emp_name`, `role`, `email`など）を保持できるようにする。
+2.  **トークンリフレッシュメカニズムの実装/更新**:
+    * `procure-erp-frontend/lib/api/axios.ts` のレスポンスインターセプター内に、Access Tokenの自動リフレッシュロジックを実装する。
+    * HTTP 401 Unauthorized エラーを検知し、Refresh Token（HttpOnly Cookieとして自動送信）を使用して新しいAccess Tokenを取得するバックエンドAPI（例: `/auth/refresh`）を呼び出す。
+    * 新しいAccess Tokenが取得できたら、HttpOnly Cookieとしてクライアントに設定されることを期待し、元のリクエストを再試行する。
+    * リフレッシュ試行中のリクエストキューイング機構を実装し、同時多発的な401エラーでの重複リフレッシュを防止する。
+    * Refresh Tokenも無効な場合や、バックエンドからのリフレッシュ応答が不正な場合は、グローバルなログアウト処理 (`auth-utils.ts`の`clearAllAuthData`) を呼び出す。
+3.  **SSO認証状態の適切な処理**:
+    * OIDCコールバック (`/dashboard#access_token=...`) からJWT（Access Token）をパースし、バックエンドからのHttpOnly Cookieによるトークン設定を待機する。
+    * JWTペイロードからユーザー情報（`EmpAccount`関連情報）を抽出し、`authStore`の`login`メソッドを通じて認証状態を更新する。
+    * `AuthContext.tsx`の`persistAuth`関数から、`localStorage.setItem('refreshToken', res.refreshToken);` の行を**削除**し、リフレッシュトークンもHttpOnly Cookieでバックエンドが管理することを徹底する。
+    * `AuthContext.tsx`および`auth-utils.ts`内の`localStorage.removeItem('refreshToken')`の呼び出しも削除し、**HTTPOnly Cookieポリシーへの完全準拠を確保**する。
+4.  エラーハンドリングの強化: APIクライアントレベルで認証エラーを適切に処理し、ユーザーに分かりやすいフィードバックを提供する。
+5.  **IdP障害時の処理**:
+    * SSO認証失敗時（例: IdPが利用できない、無効なクレームが返されるなど）は、**SSOログイン画面でのエラー表示後、ユーザーがローカル認証のログインを試みられるように、ログイン画面に戻る（またはローカル認証フォームを表示し続ける）ことで対応する。**
+【注意点】
+- 既存の認証フロー（ローカル認証）を損なわないこと。
+- **HttpOnly Cookieによるセキュアなトークン管理のポリシーを厳守すること。クライアントサイドでのJWTの直接的な読み書きは行わない。**
+- ユーザー体験の向上（セッション切れによる再ログインの回避）。
+- デバッグ容易性を考慮したログ出力（開発環境でのみ有効）。
+【成果物】
+- 更新された `contexts/AuthContext.tsx`
+- 更新された `stores/authStore.ts` および `stores/useAuth.ts`
+- 拡張された `lib/api/axios.ts` (トークンリフレッシュロジック)
+- 必要なタイプ定義 (例: JWTペイロードの型) と単体テスト (可能な範囲で)
+5. テストと統合
+プロンプト9: 単体テスト実装
+SSO機能のための単体テストを実装してください。
+【対象コンポーネント】
+
+OidcService (src/core/auth/oidc/services/oidc.service.ts)
+JwksCache (src/core/auth/oidc/services/jwks-cache.service.ts)
+TokenService (src/core/auth/token/services/token.service.ts - もし独立したサービスとして実装した場合)
+OidcController (src/core/auth/oidc/controllers/oidc.controller.ts)
+UsersServiceのSSO関連ロジック (src/modules/users/users.service.ts)
+LoginAccountService/Repository (LoginAccountの作成・検索関連ロジック)
+Organizationに関連するSSO設定取得ロジック (OrganizationModule/Service/Repository)
+ログイン画面のSSO関連コンポーネント（組織コード入力、SSOボタン表示ロジック）
+認証状態管理（AuthContext, authStore）の拡張部分
+lib/api/axios.ts のトークンリフレッシュインターセプター
+
+【テスト要件】
+
+各メソッドの機能検証 (例: OIDC URL生成の正確性、JITプロビジョニングの正しい動作、トークン検証の成功/失敗ケース)。
+エッジケースの検証 (例: 組織コードが無効な場合、IdPからのクレームが不足している場合、HttpOnly Cookieが存在しない場合)。
+エラー処理の検証 (例: 認証失敗時のエラーメッセージ表示、リフレッシュ失敗時のログアウト)。
+モックを使用した依存関係の分離 (Prisma Client, passport-openidconnectのStrategy、Http/Cookie操作など)。
+特にセキュリティに関連するロジック（トークン検証、Nonce/Stateチェック、Cookie属性の設定）のテストを徹底すること。
+JWKSキャッシュの動作検証（キャッシュヒット/ミス、TTL期限切れ、更新メカニズム）。
+IdP障害時のフォールバックフローのテスト。
+
+【成果物】
+
+各コンポーネントの単体テストファイル
+テストヘルパーとモック
+
+プロンプト10: 統合テスト実装
+SSO認証フローの統合テストを実装してください。
+【テスト範囲】
+
+エンドツーエンドのSSO認証フロー: ログイン画面での組織コード入力 → バックエンドでのSSO設定チェック → SSO認証開始 (/auth/oidc/login) → OIDCプロバイダーによる認証（モック）→ コールバック処理 (/auth/oidc/callback) → アプリケーション独自のHttpOnly Cookie JWT発行 → ダッシュボードリダイレクト (/dashboard)
+JITプロビジョニングフロー（新規ユーザー作成、既存ユーザーへのLoginAccount追加）。
+エラーシナリオ処理（例: OIDC State不一致、トークン検証失敗、無効な組織コードでのログイン試行、JITプロビジョニング失敗）。
+アクセストークン自動リフレッシュフローのテスト（Access Token期限切れ後のAPI呼び出しで自動的にリフレッシュされること）。
+
+期限切れアクセストークンでの API 呼び出し
+リフレッシュトークンの有効性検証
+リフレッシュ成功後の元リクエスト再実行
+重複リフレッシュリクエストの適切な処理
+
+
+HttpOnly CookieでのJWT管理が正しく機能していることの検証（クライアントサイドJSからアクセスできないこと、適切な属性設定がされていること）。
+
+Cookie属性の検証（HttpOnly, Secure, SameSite, Path, Domain）
+クライアントからのCookie読み取り不可能の確認
+ログアウト時のCookieクリア検証
+
+
+IdP障害シミュレーションとフォールバック認証フローのテスト（組織設定による挙動の違いを含む）。
+ユーザー体験測定（ログインフロー完了時間、エラー発生率、リダイレクト回数）。
+
+【テスト環境要件】
+
+テスト用のOIDCプロバイダーモック（例: node-oidc-providerやJestのモック機能を利用）。
+テストデータベース設定（PostgreSQL）。
+E2Eテスト用のセットアップと破棄（Cypress/Playwrightなど）。
+Docker Composeを使用したバックエンド/フロントエンド/DB/Redisの統合環境でのテスト。
+IdP障害シミュレーション機能の実装（遅延・タイムアウト・エラー応答の注入）。
+
+【注意点】
+
+実際のIdP連携をモックで模倣し、本番IdPに依存しないこと。
+データベーストランザクションの適切な処理（各テストケースでクリーンな状態を保証）。
+認証状態の正確な検証（HttpOnly Cookieの存在、Zustandストアの状態など）。
+セキュリティ要件（例: CSRFトークンの検証、X-CSRF-Tokenヘッダーの付与）も統合テストに含めること。
+モニタリングとパフォーマンス測定ポイントを統合テストに組み込むこと。
+
+【成果物】
+
+統合テストファイル
+テスト用のOIDCプロバイダーモック、フィクスチャ
+テスト実行手順ドキュメント
+パフォーマンス測定レポートテンプレート
+
+6. デプロイと移行
+プロンプト11: データベースマイグレーション計画
+本番環境へのデータベースマイグレーション計画を策定してください。
+【要件】
+
+Prismaによるスキーマ変更マイグレーションと、別途実行するTypeScriptデータ移行スクリプトの手順を明確に定義。
+
+スキーマ変更とデータ移行の分離（Prismaマイグレーションでスキーマのみ変更し、データ移行は別途TypeScriptスクリプトで実行）
+データ移行スクリプトの独立実行手順と検証方法
+
+
+ダウンタイムを最小化するマイグレーション手順（例: ブルー/グリーンデプロイメントの考慮、データのロック期間の最小化）。
+データ整合性を確保する検証ステップ（マイグレーション前後のデータ件数チェック、主要データの妥当性確認など）。
+ロールバック計画（問題発生時のデータ復旧手順）。
+パフォーマンス最適化対策（大規模データに対するインデックス追加、バッチ処理の利用など）。
+段階的なデータベース更新戦略（例: スキーマ変更→アプリケーションデプロイ→データ移行→検証→完全切り替え）。
+
+【注意点】
+
+大規模データに対する配慮。
+トランザクション安全性。
+並行実行戦略。
+既存のEmpAccountからEmpAccountとLoginAccountへのデータ移行が安全かつ正確に行われること。
+マイグレーション中に既存サービスへの影響を最小限に抑える戦略。
+本番環境固有の考慮事項（バックアップ、監視、アラート設定など）。
+
+【成果物】
+
+詳細なマイグレーション手順書 (Prismaマイグレーション、データ移行スクリプトの実行順序、検証手順、ロールバック手順を含む)
+検証スクリプト
+ロールバックスクリプト
+環境別（開発・ステージング・本番）の考慮事項リスト
+
+プロンプト12: デプロイとロールアウト計画
+SSO機能のデプロイとロールアウト計画を策定してください。
+【要件】
+
+段階的なデプロイ戦略（例: まずはテスト環境で徹底検証、その後一部のユーザーグループ/テストテナントでパイロット導入）。
+初期テナントの選定基準（協力的な顧客、小規模な組織など）。
+モニタリングと監視計画（SSOログイン成功率、エラー率、パフォーマンス、JITプロビジョニングの成功/失敗など）。
+
+特にSSOログインフローの各ステップ（リダイレクト、コールバック、トークン取得、自動リフレッシュ）におけるエラー率とレイテンシーの監視を強化すること。
+主要なSSO関連の監査ログが適切に記録されていることの確認。
+ユーザー体験メトリクス（ログイン完了までの平均時間、セッション継続率、リフレッシュ成功率など）。
+IdPサービス可用性と障害検出（Azure Status Pageとの連携、自動フォールバックトリガーなど）。
+
+
+ユーザー向けドキュメント（SSO設定方法、SSOログイン手順、トラブルシューティングFAQ）。
+サポート体制の整備（SSO関連の問題発生時のエスカレーションフロー）。
+ロールバック計画（SSO機能全体または特定テナントのSSO機能を無効化する手順）。
+A/Bテスト（異なるSSOログインUI/UXバリエーションの効果測定）。
+
+【注意点】
+
+デプロイリスクの最小化。
+フィードバックループの確立。
+サポート体制の整備。
+セキュリティ脆弱性診断（可能であれば外部専門家による）の実施計画。
+ユーザートレーニングとサポート資料の準備。
+初回ログイン体験の最適化（特にJITプロビジョニングされるユーザー向け）。
+
+【成果物】
+
+デプロイスケジュールと手順
+モニタリングダッシュボード設計（SSO関連のメトリクスとアラート）
+ユーザーガイドテンプレート
+サポートフロー図
+トラブルシューティングガイド（一般的な問題と解決策のリスト）
+ロールバック手順書
+ユーザーフィードバック収集計画
+
+7. トラブルシューティングガイド
+プロンプト13: SSO障害時対応プラン
+SSO機能の障害発生時のトラブルシューティングガイドを作成してください。
+【主要な障害シナリオ】
+
+IdP（Azure AD）側の障害
+
+Microsoft Azureサービスの停止・遅延
+JWKS公開鍵取得エラー
+トークンエンドポイントからの不正レスポンス
+レスポンス遅延によるタイムアウト
+
+
+認証フロー内の障害
+
+State/Nonceパラメータの不一致
+トークン検証失敗
+アクセストークン有効期限切れとリフレッシュ失敗
+CSRFトークン検証エラー
+
+
+JITプロビジョニング障害
+
+必須クレームの欠落
+データベース制約違反
+既存アカウントとの不整合
+
+
+環境・設定問題
+
+本番/テスト環境間のリダイレクトURI不一致
+クライアントID/シークレットの不一致
+IdPのクレーム設定ミス
+Cookieドメイン設定エラー
+
+
+
+【要件】
+
+各障害シナリオについて以下を定義:
+
+症状の識別方法（エラーコード、エラーメッセージ、ログパターン）
+診断手順（ログ確認、APIテスト、設定確認など）
+解決策（リカバリーアクション、設定修正、コード修正など）
+一時的な回避策（フォールバック認証など）
+
+
+トラブルシューティングフロー図
+エラーコードとメッセージのリファレンス
+サポートチーム向けの障害対応チェックリスト
+エンドユーザー向けの分かりやすいエラーメッセージと対処法
+高頻度な問題のFAQ
+自動復旧メカニズム（リトライロジック、フォールバックなど）の説明
+
+【成果物】
+
+詳細なトラブルシューティングガイド
+エラーコードリファレンス
+運用チーム向けのチェックリスト
+エンドユーザー向けFAQ
+
+8. 拡張計画
+プロンプト14: 将来の認証拡張計画
+SSO機能の次のフェーズで検討すべき拡張機能を計画してください。
+【検討すべき拡張機能】
+
+追加のOIDCプロバイダー対応
+
+Google Workspace
+Okta
+Auth0
+AWS Cognito
+
+
+MFA (多要素認証) 実装
+
+TOTP (Time-based One-Time Password)
+WebAuthn/FIDO2 (生体認証)
+SMS/メール認証
+
+
+詳細な権限管理
+
+IdPからの権限・グループ情報のマッピング
+ロールベースのアクセス制御の拡張
+
+
+セキュリティ強化
+
+異常ログイン検知
+高度なログイン監査
+アカウントロック機能
+
+
+管理者向け機能
+
+SSO設定の管理UI
+ユーザープロビジョニング管理
+監査レポート
+
+
+ユーザーエクスペリエンス向上
+
+パスワードレスログイン
+リメンバーミー機能
+デバイス管理
+
+
+
+【成果物】
+
+機能ロードマップ
+技術要件と依存関係
+優先順位と実装難易度評価
+工数見積もり

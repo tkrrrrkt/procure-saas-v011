@@ -1,0 +1,54 @@
+---
+description: NestJSバックエンド開発におけるモジュール設計、DI、DTO、Prisma、セキュリティ、キャッシュ、通知に関するガイドライン。
+globs: ["src/**/*.ts"] # NestJSバックエンドのソースファイルに適用 [cite: 5]
+type: AutoAttached # 該当ファイルが参照された場合に適用 [cite: 5]
+priority: 3
+tags: ["nestjs", "backend", "security", "prisma"]
+version: "1.0.0"
+---
+# NestJS バックエンド規約
+
+## 2.1. バックエンド (procure-erp-backend)
+- **フレームワーク**: NestJS (TypeScript) [cite: 2]
+- **言語**: TypeScript [cite: 2]
+- **データベース**: PostgreSQL [cite: 2]
+- **ORM**: Prisma [cite: 2]
+- **認証・認可**: JWT (Access Token & Refresh Token) をHTTPOnly Cookieで管理。ローカル認証戦略。SSO (OpenID Connect via Azure AD) 戦略。EmpAccountとLoginAccountの分離による認証方法の多様性への対応。AccessTokenの自動リフレッシュ機能。CSRF対策も実装済み。 [cite: 2]
+- **API文書化**: Swagger（OpenAPI） [cite: 2]
+- **テスト**: Jest [cite: 2]
+- **キャッシュ**: Redis (トークンブラックリスト、レートリミット等) [cite: 2]
+- **コンテナ化**: Docker（docker-compose.ymlを使用） [cite: 2]
+- **監視・ロギング**: Audit Logの実装あり。 [cite: 2]
+- **共通機能**: [cite: 2]
+    - `common` モジュール: CSRF, Audit Log, Notifications, Security (Anomaly Detection), Throttler, Validation, Exception Filters, Interceptors (Transform, Audit Log). [cite: 2]
+    - `core` モジュール: Auth, Database (Prisma), Redis. [cite: 3]
+    - `modules` モジュール: Health Check, Users. [cite: 3]
+- **ディレクトリ構造**: NestJSの標準的なモジュール分割 (`src/modules`, `src/common`, `src/core`, `src/config` など) を遵守。 [cite: 4]
+
+## 3.2. バックエンド (NestJS)
+- **モジュール設計**: 各機能は独立したモジュールとして設計し、責務を明確に分離すること。循環参照を避ける。 [cite: 7]
+- **DI (Dependency Injection)**: NestJSのDIコンテナを適切に活用し、依存関係を明確にすること。 [cite: 7]
+- **DTO (Data Transfer Object)**: `class-validator` および `class-transformer` を使用し、DTOによるバリデーションを厳格に適用すること。 [cite: 7]
+- **Prisma**: [cite: 7]
+    - マイグレーションファイル (`prisma/migrations`) は自動生成ではなく、手動での確認と調整を行うこと。 [cite: 7]
+    - `PrismaService` (`core/database/prisma.service.ts`) を介してデータベースアクセスを行うこと。 [cite: 7]
+    - シーディング (`prisma/seed.ts`) の内容を理解し、開発環境でのデータ投入に活用すること。 [cite: 7]
+- **セキュリティ**: [cite: 7]
+    - CSRFトークンの生成と検証を徹底すること (`csrf.middleware.ts`, `csrf.controller.ts`)。 [cite: 7]
+    - 認証ガード (`jwt-auth.guard.ts`, `local-auth.guard.ts`) を適切に適用すること。 [cite: 7]
+    - 特権操作 (`privileged-operation.decorator.ts`) には必ず適切な認可ロジックを実装すること。 [cite: 7]
+    - 監査ログ (`audit-log.service.ts`, `audit-log.interceptor.ts`, `audit-log.enum.ts`) を利用し、重要な操作を記録すること。 [cite: 7]
+    - 異常検知サービス (`anomaly-detection.service.ts`) の機能を理解し、セキュリティ強化に貢献すること。 [cite: 7]
+    - Helmet使用によるHTTPヘッダー保護を継続し、CSP（Content Security Policy）の詳細設定を適切に行うこと。 [cite: 7]
+    - JWTブラックリスト機能 (`token-blacklist.service.ts`) による無効化トークン管理を徹底すること。 [cite: 7]
+    - OIDCプロトコルに厳密に従い、Nonce、State、IDトークンの検証を徹底すること。 [cite: 7]
+    - SSO認証関連のイベント（成功・失敗）は、監査ログに詳細かつ一貫した形式で記録し、セキュリティインシデントの分析に役立てること。 [cite: 8]
+    - JWT（Access TokenおよびRefresh Token）は、HttpOnly, Secure, SameSite=Lax/Strict の属性を持つCookieとしてサーバーサイドで設定し、クライアントサイドのJavaScriptから直接アクセスさせないポリシーを厳守すること。 [cite: 8]
+    - クライアントサイドでのJWTの直接的な読み書きは一切行わないこと。 [cite: 8]
+    - Refresh TokenによるAccessTokenのリフレッシュは、安全なAPIエンドポイント経由で行い、リプレイ攻撃を防ぐメカニズム（例: Refresh Tokenの使い捨てまたは再発行）を検討すること。 [cite: 8]
+    - パスワードはbcrypt等の強力なハッシュアルゴリズムを使用してハッシュ化して保存すること。具体的なパスワードポリシー（最低文字数、大文字小文字、数字、記号を含むなど）を導入し、検証すること。 [cite: 8]
+    - 認証フローにおいて、セッション固定攻撃対策を明示的に実装すること（例: JWTトークンの更新時や認証後のセッションID再生成）。 [cite: 8]
+    - 多要素認証（2FA/MFA）の導入を検討し、ユーザー認証のセキュリティレベルを向上させること。 [cite: 8]
+    - シークレット管理は環境変数（`.env`）だけでなく、本番環境ではAWS KMSなどのより安全なシークレット管理サービスを介して行うこと。Prismaスキーマのデータベース接続文字列も環境変数で管理し、ハードコードを避けること。 [cite: 8]
+- **通知**: `NotificationService` (`common/notifications`) を通じて、Email, In-App, Slackなどの通知プロバイダを適切に利用すること。 [cite: 8]
+- **キャッシュ戦略**: Redis (`core/redis`) の導入を前提とし、頻繁にアクセスされるマスタデータやセッション情報など、具体的なキャッシュ戦略を設計・実装することでパフォーマンスを最適化すること。 [cite: 8]

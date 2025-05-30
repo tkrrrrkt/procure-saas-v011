@@ -1,0 +1,476 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = "postgresql://postgres:!Ktkrr0714@localhost:5432/procure_erp?schema=v000"
+  //url = env("DATABASE_URL")
+}
+
+//============================================================
+// テナント設定テーブル（Tenantより先に定義）
+//============================================================
+
+// テナント設定テーブル
+model TenantSettings {
+  id                    String   @id @default(uuid()) @db.Uuid
+  tenant_id             String   @unique @db.Uuid
+  locale                String   @default("ja") @db.VarChar(10)
+  timezone              String   @default("Asia/Tokyo") @db.VarChar(50)
+  date_format           String   @default("YYYY-MM-DD") @db.VarChar(20)
+  currency              String   @default("JPY") @db.VarChar(3)
+  decimal_separator     String   @default(".") @db.Char(1)
+  thousand_separator    String   @default(",") @db.Char(1)
+  approval_flow_enabled Boolean  @default(true)
+  auto_po_enabled       Boolean  @default(false)
+  session_timeout_mins  Int      @default(30)
+  mfa_enabled           Boolean  @default(false)
+  created_at            DateTime @default(now())
+  updated_at            DateTime @updatedAt
+  
+  // リレーション
+  tenant                Tenant   @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+  
+  @@map("tenant_setting")
+}
+
+// パスワードポリシー設定
+model PasswordPolicy {
+  id                  String   @id @default(uuid()) @db.Uuid
+  tenant_id           String   @unique @db.Uuid
+  min_length          Int      @default(8)
+  require_uppercase   Boolean  @default(true)
+  require_lowercase   Boolean  @default(true)
+  require_number      Boolean  @default(true)
+  require_special     Boolean  @default(true)
+  expire_days         Int      @default(90)
+  history_count       Int      @default(5)
+  created_at          DateTime @default(now())
+  updated_at          DateTime @updatedAt
+  
+  @@index([tenant_id])
+  @@map("password_policy")
+}
+
+//============================================================
+// テナント関連テーブル
+//============================================================
+
+// テナント（顧客企業/組織）テーブル
+model Tenant {
+  id                    String         @id @default(uuid()) @db.Uuid
+  name                  String         @db.VarChar(100)
+  display_name          String         @db.VarChar(100)
+  subdomain             String?        @unique @db.VarChar(50)
+  status                String         @default("ACTIVE") @db.VarChar(20)
+  subscription_plan     String         @default("STANDARD") @db.VarChar(20)
+  subscription_status   String         @default("ACTIVE") @db.VarChar(20)
+  trial_ends_at         DateTime?
+  billing_email         String?        @db.VarChar(255)
+  billing_address_line1 String?        @db.VarChar(255)
+  billing_address_line2 String?        @db.VarChar(255)
+  billing_city          String?        @db.VarChar(100)
+  billing_state         String?        @db.VarChar(100)
+  billing_postal_code   String?        @db.VarChar(20)
+  billing_country       String?        @db.VarChar(50)
+  logo_url              String?        @db.VarChar(255)
+  max_users             Int            @default(50)
+  sso_enabled           Boolean        @default(false)
+  created_at            DateTime       @default(now())
+  updated_at            DateTime       @updatedAt
+  deleted_at            DateTime?
+  
+  // リレーション
+  tenant_settings       TenantSettings?
+  emp_accounts          EmpAccount[]
+  sso_configurations    SsoConfiguration[]
+  departments           Department[]
+  allowed_ip_ranges     TenantIpRange[]
+  allowed_email_domains TenantEmailDomain[]
+  tenant_features       TenantFeature[]
+  
+  @@map("tenant")
+}
+
+// テナント許可IPアドレス範囲
+model TenantIpRange {
+  id              String   @id @default(uuid()) @db.Uuid
+  tenant_id       String   @db.Uuid
+  ip_range        String   @db.VarChar(50)
+  description     String?  @db.VarChar(255)
+  created_at      DateTime @default(now())
+  
+  // リレーション
+  tenant          Tenant   @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+  
+  @@index([tenant_id])
+  @@map("tenant_ip_range")
+}
+
+// テナント許可メールドメイン
+model TenantEmailDomain {
+  id              String   @id @default(uuid()) @db.Uuid
+  tenant_id       String   @db.Uuid
+  domain          String   @db.VarChar(255)
+  is_primary      Boolean  @default(false)
+  created_at      DateTime @default(now())
+  
+  // リレーション
+  tenant          Tenant   @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+  
+  @@index([tenant_id])
+  @@map("tenant_email_domain")
+}
+
+// テナント機能フラグ
+model TenantFeature {
+  id              String   @id @default(uuid()) @db.Uuid
+  tenant_id       String   @db.Uuid
+  feature_name    String   @db.VarChar(100)
+  enabled         Boolean  @default(true)
+  settings        String?  @db.Text
+  created_at      DateTime @default(now())
+  updated_at      DateTime @updatedAt
+  
+  // リレーション
+  tenant          Tenant   @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+  
+  @@unique([tenant_id, feature_name])
+  @@index([tenant_id])
+  @@map("tenant_feature")
+}
+
+//============================================================
+// 部門テーブル（EmpAccountより先に定義）
+//============================================================
+
+// 部門テーブル
+model Department {
+  id              String        @id @default(uuid()) @db.Uuid
+  tenant_id       String        @db.Uuid
+  name            String        @db.VarChar(100)
+  code            String        @db.VarChar(50)
+  parent_id       String?       @db.Uuid
+  manager_id      String?       @db.Uuid
+  cost_center     String?       @db.VarChar(50)
+  created_at      DateTime      @default(now())
+  updated_at      DateTime      @updatedAt
+  deleted_at      DateTime?
+  
+  // リレーション
+  tenant          Tenant        @relation(fields: [tenant_id], references: [id])
+  parent          Department?   @relation("DepartmentHierarchy", fields: [parent_id], references: [id])
+  children        Department[]  @relation("DepartmentHierarchy")
+  emp_accounts    EmpAccount[]
+  
+  @@unique([tenant_id, code])
+  @@index([tenant_id])
+  @@index([parent_id])
+  @@map("department")
+}
+
+//============================================================
+// 認証・ユーザー関連テーブル
+//============================================================
+
+// 従業員アカウント（ユーザー基本情報）
+model EmpAccount {
+  id                String        @id @default(uuid()) @db.Uuid
+  tenant_id         String        @db.Uuid
+  employee_code     String?       @db.VarChar(50)
+  first_name        String        @db.VarChar(50)
+  last_name         String        @db.VarChar(50)
+  email             String        @db.VarChar(255)
+  phone             String?       @db.VarChar(20)
+  job_title         String?       @db.VarChar(100)
+  department_id     String?       @db.Uuid
+  manager_id        String?       @db.Uuid
+  status            String        @default("ACTIVE") @db.VarChar(20)
+  avatar_url        String?       @db.VarChar(255)
+  preferred_language String?      @db.VarChar(10)
+  approval_limit    Decimal?      @db.Decimal(15, 2)
+  default_cost_center String?     @db.VarChar(50)
+  created_at        DateTime      @default(now())
+  updated_at        DateTime      @updatedAt
+  deleted_at        DateTime?
+  
+  // リレーション
+  tenant            Tenant        @relation(fields: [tenant_id], references: [id])
+  department        Department?   @relation(fields: [department_id], references: [id])
+  manager           EmpAccount?   @relation("ManagerToEmployee", fields: [manager_id], references: [id])
+  team_members      EmpAccount[]  @relation("ManagerToEmployee")
+  login_accounts    LoginAccount[]
+  roles             EmpAccountRole[]
+  
+  @@unique([tenant_id, email])
+  @@unique([tenant_id, employee_code])
+  @@index([tenant_id])
+  @@index([department_id])
+  @@index([email])
+  @@map("emp_account")
+}
+
+// ログインアカウント（認証情報）
+model LoginAccount {
+  id              String         @id @default(uuid()) @db.Uuid
+  emp_account_id  String         @db.Uuid
+  auth_method     String         @db.VarChar(20)
+  identifier      String         @db.VarChar(255)
+  password_hash   String?        @db.VarChar(255)
+  reset_token     String?        @db.VarChar(255)
+  reset_expires   DateTime?
+  provider        String?        @db.VarChar(50)
+  provider_user_id String?       @db.VarChar(255)
+  mfa_enabled     Boolean        @default(false)
+  mfa_secret      String?        @db.VarChar(255)
+  last_login_at   DateTime?
+  last_login_ip   String?        @db.VarChar(50)
+  failed_attempts Int            @default(0)
+  locked_until    DateTime?
+  created_at      DateTime       @default(now())
+  updated_at      DateTime       @updatedAt
+  
+  // リレーション
+  emp_account     EmpAccount     @relation(fields: [emp_account_id], references: [id], onDelete: Cascade)
+  login_history   LoginHistory[]
+  refresh_tokens  RefreshToken[]
+  
+  @@unique([auth_method, identifier, provider])
+  @@index([emp_account_id])
+  @@map("login_account")
+}
+
+// リフレッシュトークン
+model RefreshToken {
+  id              String       @id @default(uuid()) @db.Uuid
+  login_account_id String      @db.Uuid
+  token_hash      String       @db.VarChar(255)
+  expires_at      DateTime
+  device_info     String?      @db.VarChar(255)
+  ip_address      String?      @db.VarChar(50)
+  created_at      DateTime     @default(now())
+  
+  // リレーション
+  login_account   LoginAccount @relation(fields: [login_account_id], references: [id], onDelete: Cascade)
+  
+  @@index([login_account_id])
+  @@index([token_hash])
+  @@map("refresh_token")
+}
+
+// ログイン履歴
+model LoginHistory {
+  id              String       @id @default(uuid()) @db.Uuid
+  login_account_id String      @db.Uuid
+  ip_address      String       @db.VarChar(50)
+  user_agent      String       @db.VarChar(255)
+  success         Boolean
+  failure_reason  String?      @db.VarChar(255)
+  created_at      DateTime     @default(now())
+  
+  // リレーション
+  login_account    LoginAccount @relation(fields: [login_account_id], references: [id], onDelete: Cascade)
+  
+  @@index([login_account_id])
+  @@index([created_at])
+  @@map("login_history")
+}
+
+// SSO設定テーブル
+model SsoConfiguration {
+  id              String    @id @default(uuid()) @db.Uuid
+  tenant_id       String    @db.Uuid
+  provider        String    @db.VarChar(50)
+  display_name    String    @db.VarChar(100)
+  is_default      Boolean   @default(false)
+  enabled         Boolean   @default(true)
+  created_at      DateTime  @default(now())
+  updated_at      DateTime  @updatedAt
+  
+  // リレーション
+  tenant          Tenant    @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+  sso_settings    SsoConfigurationSetting[]
+  
+  @@unique([tenant_id, provider])
+  @@index([tenant_id])
+  @@map("sso_configuration")
+}
+
+// SSO設定詳細
+model SsoConfigurationSetting {
+  id                   String           @id @default(uuid()) @db.Uuid
+  sso_configuration_id String           @db.Uuid
+  key                  String           @db.VarChar(100)
+  value                String           @db.Text
+  is_encrypted         Boolean          @default(false)
+  created_at           DateTime         @default(now())
+  updated_at           DateTime         @updatedAt
+  
+  // リレーション
+  sso_configuration    SsoConfiguration @relation(fields: [sso_configuration_id], references: [id], onDelete: Cascade)
+  
+  @@unique([sso_configuration_id, key])
+  @@index([sso_configuration_id])
+  @@map("sso_configuration_setting")
+}
+
+//============================================================
+// 権限・ロール関連テーブル
+//============================================================
+
+// 権限定義テーブル
+model Permission {
+  id              String          @id @default(uuid()) @db.Uuid
+  name            String          @unique @db.VarChar(100)
+  display_name    String          @db.VarChar(100)
+  description     String?         @db.VarChar(255)
+  resource        String          @db.VarChar(50)
+  action          String          @db.VarChar(50)
+  created_at      DateTime        @default(now())
+  updated_at      DateTime        @updatedAt
+  
+  // リレーション
+  role_permissions RolePermission[]
+  
+  @@unique([resource, action])
+  @@map("permission")
+}
+
+// ロール定義テーブル
+model Role {
+  id              String          @id @default(uuid()) @db.Uuid
+  tenant_id       String?         @db.Uuid
+  name            String          @db.VarChar(50)
+  display_name    String          @db.VarChar(100)
+  description     String?         @db.VarChar(255)
+  is_system       Boolean         @default(false)
+  created_at      DateTime        @default(now())
+  updated_at      DateTime        @updatedAt
+  
+  // リレーション
+  role_permissions RolePermission[]
+  emp_accounts     EmpAccountRole[]
+  
+  @@unique([tenant_id, name])
+  @@map("role")
+}
+
+// ロールと権限のマッピングテーブル
+model RolePermission {
+  id              String      @id @default(uuid()) @db.Uuid
+  role_id         String      @db.Uuid
+  permission_id   String      @db.Uuid
+  created_at      DateTime    @default(now())
+  
+  // リレーション
+  role            Role        @relation(fields: [role_id], references: [id], onDelete: Cascade)
+  permission      Permission  @relation(fields: [permission_id], references: [id], onDelete: Cascade)
+  
+  @@unique([role_id, permission_id])
+  @@map("role_permission")
+}
+
+// 従業員とロールのマッピングテーブル
+model EmpAccountRole {
+  id              String      @id @default(uuid()) @db.Uuid
+  emp_account_id  String      @db.Uuid
+  role_id         String      @db.Uuid
+  created_at      DateTime    @default(now())
+  updated_at      DateTime    @updatedAt
+  
+  // リレーション
+  emp_account     EmpAccount  @relation(fields: [emp_account_id], references: [id], onDelete: Cascade)
+  role            Role        @relation(fields: [role_id], references: [id], onDelete: Cascade)
+  
+  @@unique([emp_account_id, role_id])
+  @@map("emp_account_role")
+}
+
+//============================================================
+// 監査・セキュリティログ関連テーブル
+//============================================================
+
+// 監査ログテーブル
+model AuditLog {
+  id                String    @id @default(uuid()) @db.Uuid
+  tenant_id         String?   @db.Uuid
+  user_id           String?   @db.Uuid
+  user_role         String?   @db.VarChar(50)
+  action            String    @db.VarChar(100)
+  resource          String    @db.VarChar(100)
+  resource_id       String?   @db.VarChar(255)
+  ip_address        String    @db.VarChar(50)
+  user_agent        String?   @db.VarChar(255)
+  request_summary   String?   @db.Text
+  response_status   Int?
+  severity          String    @default("LOW") @db.VarChar(10)
+  log_type          String    @db.VarChar(50)
+  execution_time    Int?
+  is_privileged     Boolean   @default(false)
+  additional_info   String?   @db.Text
+  timestamp         DateTime  @default(now())
+  
+  // 詳細データは別テーブルに保存
+  request_details   AuditLogDetail[]
+  
+  @@index([tenant_id])
+  @@index([user_id])
+  @@index([resource])
+  @@index([timestamp])
+  @@map("audit_log")
+}
+
+// 監査ログ詳細
+model AuditLogDetail {
+  id              String    @id @default(uuid()) @db.Uuid
+  audit_log_id    String    @db.Uuid
+  detail_type     String    @db.VarChar(50)
+  key             String    @db.VarChar(100)
+  value           String    @db.Text
+  created_at      DateTime  @default(now())
+  
+  // リレーション
+  audit_log       AuditLog  @relation(fields: [audit_log_id], references: [id], onDelete: Cascade)
+  
+  @@index([audit_log_id])
+  @@index([detail_type])
+  @@map("audit_log_detail")
+}
+
+// 異常ログテーブル
+model AnomalyLogRecord {
+  id              String            @id @default(uuid()) @db.Uuid
+  type            String            @db.VarChar(100)
+  severity        String            @db.VarChar(10)
+  user_id         String?           @db.Uuid
+  summary         String            @db.Text
+  detected_at     DateTime
+  is_resolved     Boolean           @default(false)
+  resolved_at     DateTime?
+  resolved_by     String?           @db.Uuid
+  resolution_note String?           @db.Text
+  
+  // 詳細データは別テーブルに保存
+  anomaly_details AnomalyLogDetail[]
+  
+  @@index([type])
+  @@index([user_id])
+  @@index([detected_at])
+  @@map("anomaly_log_record")
+}
+
+// 異常ログ詳細
+model AnomalyLogDetail {
+  id                  String          @id @default(uuid()) @db.Uuid
+  anomaly_log_record_id String          @db.Uuid
+  key                 String          @db.VarChar(100)
+  value               String          @db.Text
+  created_at          DateTime        @default(now())
+  
+  // リレーション
+  anomaly_log_record  AnomalyLogRecord @relation(fields: [anomaly_log_record_id], references: [id], onDelete: Cascade)
+  
+  @@index([anomaly_log_record_id])
+  @@map("anomaly_log_detail")
+}

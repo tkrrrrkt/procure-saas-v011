@@ -1,0 +1,706 @@
+# エンタープライズ購買管理SaaS SSO完全実装仕様書
+
+## 📋 仕様概要
+
+**プロジェクト**: 購買管理SaaS システム SSO機能実装  
+**対象顧客**: 中堅企業（年商100-500億円）  
+**開発体制**: 1名（AIエージェント活用）  
+**実装期間**: 2-3週間（MVP）  
+**技術スタック**: NestJS + Next.js + Azure AD OIDC  
+
+---
+
+## 🎯 確定仕様一覧
+
+### **認証・セキュリティ仕様**
+| 項目 | 仕様 | 備考 |
+|------|------|------|
+| **IdP優先度** | Azure AD（Microsoft Entra ID）単体 | 中堅企業80%をカバー |
+| **認証プロトコル** | OIDC（OpenID Connect） | 実装効率とセキュリティのバランス |
+| **ユーザー統合** | 自動統合（メールアドレスベース） | 導入スピード重視 |
+| **プロビジョニング** | JIT（Just-In-Time）のみ | 基本属性マッピング |
+| **セキュリティレベル** | 基本セキュリティ（必須機能） | IP制限、監査ログ、セッション管理 |
+
+### **運用・管理仕様**
+| 項目 | 仕様 | 備考 |
+|------|------|------|
+| **テナント識別** | ドメインベース（メール@以降） | UX良好、実装シンプル |
+| **管理者権限** | 段階的権限モデル | 安全性と運用性のバランス |
+| **導入方式** | テナント単位（全社一括）のみ | 実装複雑性を回避 |
+| **テスト機能** | 簡易接続テスト | 基本的な動作確認のみ |
+| **緊急時対応** | なし | シンプル運用優先 |
+
+### **技術実装仕様**
+| 項目 | 設定値 | 理由 |
+|------|--------|------|
+| **アクセストークン有効期限** | 8時間 | 営業時間分 |
+| **リフレッシュトークン有効期限** | 7日 | 週次更新 |
+| **セッションタイムアウト** | 8時間 | 営業時間分 |
+| **ログイン試行上限** | 5回 | 誤入力許容とセキュリティのバランス |
+| **データ同期** | ログイン時自動同期 | 一般的で実装シンプル |
+
+---
+
+## 🗄️ データベース設計仕様
+
+### **既存テーブル活用**
+```sql
+-- 既存のSSO関連テーブル（活用）
+- sso_configuration      -- テナント別SSO設定
+- sso_configuration_setting -- 設定詳細（Key-Value）
+- tenant_email_domain    -- ドメイン識別用
+- audit_log             -- 監査ログ
+```
+
+### **新規追加テーブル**
+```sql
+-- SSO セッション管理テーブル（新規追加）
+CREATE TABLE sso_sessions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL,
+    emp_account_id UUID NOT NULL,
+    sso_session_id VARCHAR(255) UNIQUE NOT NULL,
+    azure_object_id VARCHAR(255), -- Azure AD Object ID
+    initiated_at TIMESTAMP NOT NULL,
+    last_accessed TIMESTAMP NOT NULL,
+    expires_at TIMESTAMP NOT NULL,
+    ip_address INET,
+    user_agent TEXT,
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMP DEFAULT NOW(),
+    
+    FOREIGN KEY (tenant_id) REFERENCES tenant(id),
+    FOREIGN KEY (emp_account_id) REFERENCES emp_account(id)
+);
+
+-- SSO エラーログテーブル（新規追加）
+CREATE TABLE sso_error_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID,
+    correlation_id VARCHAR(255) NOT NULL,
+    error_type VARCHAR(50) NOT NULL, -- 'AUTH_FAILED', 'TOKEN_INVALID', 'CONFIG_ERROR'
+    error_code VARCHAR(20),
+    error_message TEXT,
+    provider_error TEXT,
+    user_email VARCHAR(255),
+    ip_address INET,
+    user_agent TEXT,
+    resolution_status VARCHAR(20) DEFAULT 'UNRESOLVED',
+    created_at TIMESTAMP DEFAULT NOW()
+);
+```
+
+---
+
+## 🏗️ システムアーキテクチャ
+
+### **バックエンド構成**
+```
+src/core/auth/sso/
+├── azure-ad/
+│   ├── azure-ad.strategy.ts          // Passport Strategy
+│   ├── azure-ad.service.ts           // Azure AD固有処理
+│   └── azure-ad.config.ts            // 設定管理
+├── jit/
+│   ├── jit-provisioning.service.ts   // JITプロビジョニング
+│   └── user-mapping.service.ts       // ユーザー属性マッピング
+├── tenant/
+│   ├── tenant-resolver.service.ts    // ドメインベーステナント識別
+│   ├── sso-config.service.ts         // テナント別設定管理
+│   └── sso-config.controller.ts      // 管理API
+├── security/
+│   ├── sso-security.service.ts       // State/Nonce検証
+│   └── session-manager.service.ts    // セッション管理
+└── errors/
+    ├── sso-error.service.ts          // エラーハンドリング
+    └── sso-error.types.ts            // エラー型定義
+```
+
+### **フロントエンド構成**
+```
+procure-erp-frontend/app/admin/sso/
+├── page.tsx                          // メイン設定画面
+├── components/
+│   ├── azure-ad-config.tsx          // Azure AD設定フォーム
+│   ├── connection-test.tsx          // 接続テスト
+│   ├── user-list.tsx               // SSO作成ユーザー一覧
+│   └── setup-guide.tsx             // 設定ガイド
+└── lib/
+    ├── sso-api.ts                   // SSO API client
+    └── sso-validation.ts            // バリデーション
+```
+
+---
+
+## 🔧 主要機能実装仕様
+
+### **1. Azure AD OIDC認証フロー**
+
+#### **認証Strategy実装**
+```typescript
+// src/core/auth/sso/azure-ad/azure-ad.strategy.ts
+@Injectable()
+export class AzureAdStrategy extends PassportStrategy(Strategy, 'azure-ad') {
+  constructor(
+    private configService: ConfigService,
+    private tenantResolver: TenantResolverService,
+    private jitService: JitProvisioningService,
+    private ssoSecurityService: SsoSecurityService,
+  ) {
+    super({
+      clientID: process.env.AZURE_AD_CLIENT_ID,
+      clientSecret: process.env.AZURE_AD_CLIENT_SECRET,
+      identityMetadata: 'https://login.microsoftonline.com/common/v2.0/.well-known/openid_configuration',
+      responseType: 'code id_token',
+      responseMode: 'form_post',
+      redirectUrl: `${process.env.BASE_URL}/auth/sso/callback`,
+      allowHttpForRedirectUrl: false,
+      passReqToCallback: true,
+      scope: ['openid', 'profile', 'email'],
+      loggingLevel: 'warn',
+    });
+  }
+
+  async validate(
+    req: any,
+    iss: string,
+    sub: string,
+    profile: any,
+    accessToken: string,
+    refreshToken: string,
+    done: Function,
+  ) {
+    try {
+      // 1. State/Nonce検証
+      const isSecure = await this.ssoSecurityService.validateStateAndNonce(
+        req.body.state,
+        profile.nonce,
+      );
+      if (!isSecure) {
+        throw new UnauthorizedException('Invalid state or nonce');
+      }
+
+      // 2. テナント識別（ドメインベース）
+      const tenant = await this.tenantResolver.resolveTenantByEmail(profile.email);
+      if (!tenant) {
+        throw new UnauthorizedException('Tenant not found for domain');
+      }
+
+      // 3. JITプロビジョニング
+      const user = await this.jitService.provisionUser(profile, tenant.id);
+
+      // 4. セッション作成
+      await this.createSsoSession(user, profile, req);
+
+      return user;
+    } catch (error) {
+      await this.handleAuthError(error, profile, req);
+      return done(error);
+    }
+  }
+}
+```
+
+#### **JITプロビジョニング実装**
+```typescript
+// src/core/auth/sso/jit/jit-provisioning.service.ts
+@Injectable()
+export class JitProvisioningService {
+  
+  async provisionUser(azureProfile: any, tenantId: string): Promise<EmpAccount> {
+    const email = azureProfile.email.toLowerCase();
+    
+    // 既存ユーザー確認（自動統合）
+    let user = await this.prisma.empAccount.findFirst({
+      where: { 
+        tenant_id: tenantId,
+        email: email 
+      }
+    });
+
+    if (user) {
+      // 既存ユーザーの情報更新（ログイン時自動同期）
+      return await this.updateUserFromAzureAD(user, azureProfile);
+    } else {
+      // 新規ユーザー作成（基本マッピング）
+      return await this.createUserFromAzureAD(azureProfile, tenantId);
+    }
+  }
+
+  private async createUserFromAzureAD(
+    azureProfile: any, 
+    tenantId: string
+  ): Promise<EmpAccount> {
+    
+    const userData = {
+      tenant_id: tenantId,
+      // 基本マッピング（安全重視）
+      first_name: azureProfile.given_name || '',
+      last_name: azureProfile.family_name || '',
+      email: azureProfile.email.toLowerCase(),
+      job_title: azureProfile.job_title || null,
+      employee_code: azureProfile.employee_id || null,
+      
+      // 手動設定項目（未設定）
+      department_id: null,
+      manager_id: null,
+      approval_limit: null,
+      status: 'PENDING_SETUP', // 初期状態
+    };
+
+    const user = await this.prisma.empAccount.create({
+      data: userData
+    });
+
+    // 管理者通知
+    await this.notifyNewUserCreated(user, tenantId);
+    
+    return user;
+  }
+
+  private async updateUserFromAzureAD(
+    user: EmpAccount,
+    azureProfile: any
+  ): Promise<EmpAccount> {
+    
+    // ログイン時自動同期（基本情報のみ）
+    return await this.prisma.empAccount.update({
+      where: { id: user.id },
+      data: {
+        first_name: azureProfile.given_name || user.first_name,
+        last_name: azureProfile.family_name || user.last_name,
+        job_title: azureProfile.job_title || user.job_title,
+        // department_id, manager_id, approval_limit は更新しない
+      }
+    });
+  }
+}
+```
+
+### **2. テナント識別システム**
+
+#### **ドメインベース識別**
+```typescript
+// src/core/auth/sso/tenant/tenant-resolver.service.ts
+@Injectable()
+export class TenantResolverService {
+  
+  async resolveTenantByEmail(email: string): Promise<Tenant | null> {
+    const domain = this.extractDomain(email);
+    
+    // ドメインからテナント検索
+    const tenantDomain = await this.prisma.tenantEmailDomain.findFirst({
+      where: { domain: domain },
+      include: { tenant: true }
+    });
+
+    if (!tenantDomain || !tenantDomain.tenant.sso_enabled) {
+      return null;
+    }
+
+    return tenantDomain.tenant;
+  }
+
+  private extractDomain(email: string): string {
+    const parts = email.split('@');
+    if (parts.length !== 2) {
+      throw new BadRequestException('Invalid email format');
+    }
+    return parts[1].toLowerCase();
+  }
+
+  async registerTenantDomain(tenantId: string, domain: string): Promise<void> {
+    await this.prisma.tenantEmailDomain.create({
+      data: {
+        tenant_id: tenantId,
+        domain: domain.toLowerCase(),
+        is_primary: true
+      }
+    });
+  }
+}
+```
+
+### **3. 管理画面実装**
+
+#### **SSO設定メイン画面**
+```tsx
+// procure-erp-frontend/app/admin/sso/page.tsx
+'use client';
+
+import { useState, useEffect } from 'react';
+import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+
+export default function SsoConfigPage() {
+  const [config, setConfig] = useState<SsoConfig | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [testResult, setTestResult] = useState<TestResult | null>(null);
+
+  return (
+    <div className="container mx-auto py-6">
+      <div className="mb-6">
+        <h1 className="text-2xl font-bold">SSO設定</h1>
+        <p className="text-gray-600">
+          Azure ADとの連携設定を行います
+        </p>
+      </div>
+
+      <Tabs defaultValue="setup" className="space-y-6">
+        <TabsList>
+          <TabsTrigger value="setup">基本設定</TabsTrigger>
+          <TabsTrigger value="test">接続テスト</TabsTrigger>
+          <TabsTrigger value="users">ユーザー管理</TabsTrigger>
+          <TabsTrigger value="guide">設定ガイド</TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="setup">
+          <Card>
+            <CardHeader>
+              <CardTitle>Azure AD設定</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div>
+                <Label htmlFor="tenantId">
+                  テナントID
+                  <span className="ml-1 text-sm text-gray-500">
+                    Azure ADのディレクトリ（テナント）ID
+                  </span>
+                </Label>
+                <Input
+                  id="tenantId"
+                  placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                  value={config?.azure_tenant_id || ''}
+                  onChange={(e) => updateConfig('azure_tenant_id', e.target.value)}
+                />
+              </div>
+
+              <div>
+                <Label htmlFor="clientId">
+                  クライアントID
+                  <span className="ml-1 text-sm text-gray-500">
+                    Azure ADアプリケーションのクライアントID
+                  </span>
+                </Label>
+                <Input
+                  id="clientId" 
+                  placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                  value={config?.azure_client_id || ''}
+                  onChange={(e) => updateConfig('azure_client_id', e.target.value)}
+                />
+              </div>
+
+              <div>
+                <Label htmlFor="clientSecret">
+                  クライアントシークレット
+                  <span className="ml-1 text-sm text-gray-500">
+                    Azure ADアプリケーションのシークレット
+                  </span>
+                </Label>
+                <Input
+                  id="clientSecret"
+                  type="password"
+                  placeholder="xxxxxxxxxxxxxxxxxxxxxx"
+                  value={config?.azure_client_secret || ''}
+                  onChange={(e) => updateConfig('azure_client_secret', e.target.value)}
+                />
+              </div>
+
+              <div className="flex space-x-2 pt-4">
+                <Button onClick={handleSave} disabled={loading}>
+                  {loading ? '保存中...' : '設定保存'}
+                </Button>
+                <Button variant="outline" onClick={handleTestConnection}>
+                  接続テスト
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="test">
+          <Card>
+            <CardHeader>
+              <CardTitle>接続テスト</CardTitle>
+              <p className="text-sm text-gray-600">
+                Azure ADとの接続を確認します
+              </p>
+            </CardHeader>
+            <CardContent>
+              {testResult && (
+                <Alert className={testResult.success ? 'border-green-200' : 'border-red-200'}>
+                  <AlertDescription>
+                    {testResult.success ? (
+                      <span className="text-green-600">✅ 接続成功！</span>
+                    ) : (
+                      <span className="text-red-600">❌ 接続失敗: {testResult.error}</span>
+                    )}
+                  </AlertDescription>
+                </Alert>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="users">
+          <Card>
+            <CardHeader>
+              <CardTitle>SSO作成ユーザー</CardTitle>
+              <p className="text-sm text-gray-600">
+                SSO認証で作成されたユーザーの一覧です
+              </p>
+            </CardHeader>
+            <CardContent>
+              <SsoUserList />
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="guide">
+          <SetupGuide />
+        </TabsContent>
+      </Tabs>
+    </div>
+  );
+}
+```
+
+### **4. エラーハンドリング**
+
+#### **ユーザーフレンドリーエラー処理**
+```typescript
+// src/core/auth/sso/errors/sso-error.service.ts
+@Injectable()
+export class SsoErrorService {
+  
+  async handleSsoError(error: any, context: SsoErrorContext): Promise<SsoErrorResponse> {
+    const correlationId = this.generateCorrelationId();
+    
+    // エラー分類
+    const errorInfo = this.classifyError(error);
+    
+    // エラーログ記録
+    await this.logSsoError({
+      correlation_id: correlationId,
+      tenant_id: context.tenantId,
+      error_type: errorInfo.type,
+      error_code: errorInfo.code,
+      error_message: errorInfo.message,
+      provider_error: JSON.stringify(error.response?.data),
+      user_email: context.userEmail,
+      ip_address: context.ipAddress,
+      user_agent: context.userAgent,
+    });
+
+    // ユーザーフレンドリーなレスポンス
+    return {
+      userMessage: this.getUserFriendlyMessage(errorInfo.type),
+      supportId: correlationId,
+      shouldRetry: errorInfo.retryable,
+      redirectUrl: this.getRedirectUrl(errorInfo.type),
+    };
+  }
+
+  private getUserFriendlyMessage(errorType: string): string {
+    const messages = {
+      'AUTH_FAILED': `
+        🔐 ログインできませんでした
+        
+        社内のAzure ADとの連携でエラーが発生しました。
+        
+        解決方法:
+        1. しばらく待ってから再度お試しください
+        2. 問題が続く場合は情報システム部にご連絡ください
+      `,
+      'CONFIG_ERROR': `
+        ⚙️ 設定エラーが発生しました
+        
+        SSO設定に問題があります。
+        管理者にお問い合わせください。
+      `,
+      'TOKEN_INVALID': `
+        🔑 認証トークンエラー
+        
+        認証情報に問題があります。
+        再度ログインをお試しください。
+      `,
+    };
+    
+    return messages[errorType] || 'システムエラーが発生しました。';
+  }
+}
+```
+
+---
+
+## 📅 実装スケジュール
+
+### **Week 1: 核心機能実装**
+**Day 1-2: 基盤実装**
+- [ ] Azure AD OIDC Strategy実装
+- [ ] テナント識別サービス
+- [ ] 基本的なJITプロビジョニング
+
+**Day 3-4: セキュリティ実装**
+- [ ] State/Nonce検証
+- [ ] セッション管理
+- [ ] エラーハンドリング基盤
+
+**Day 5: データベース設定**
+- [ ] 新規テーブル追加（マイグレーション）
+- [ ] 既存テーブル連携確認
+
+### **Week 2: 管理画面実装**
+**Day 1-2: フロントエンド基盤**
+- [ ] SSO設定画面（基本フォーム）
+- [ ] 接続テスト機能
+- [ ] API実装
+
+**Day 3-4: UI強化**
+- [ ] 設定ガイド作成
+- [ ] ユーザー一覧画面
+- [ ] エラー表示の改善
+
+**Day 5: 統合テスト**
+- [ ] E2Eテストシナリオ実行
+- [ ] エラーパターンテスト
+
+### **Week 3: 検証・調整**
+**Day 1-2: 実環境テスト**
+- [ ] Azure ADテストテナント設定
+- [ ] 実際の認証フローテスト
+- [ ] パフォーマンステスト
+
+**Day 3-4: 改善・最適化**
+- [ ] バグ修正
+- [ ] UX改善
+- [ ] セキュリティ最終確認
+
+**Day 5: ドキュメント作成**
+- [ ] 設定手順書
+- [ ] トラブルシューティングガイド
+- [ ] 運用マニュアル
+
+---
+
+## 🚀 導入・運用フロー
+
+### **顧客導入手順**
+1. **事前準備**
+   - Azure AD管理者権限確認
+   - ドメイン情報確認
+   - 既存ユーザー棚卸
+
+2. **Azure AD側設定**
+   - アプリケーション登録
+   - 認証設定
+   - ユーザー・グループ設定
+
+3. **購買システム側設定**
+   - テナント管理者がSSO設定画面で情報入力
+   - 接続テスト実行
+   - SSO機能有効化
+
+4. **運用開始**
+   - 管理者による動作確認
+   - 段階的ユーザー展開（推奨）
+   - 部署・権限の手動設定
+
+### **運用監視項目**
+- [ ] SSO認証成功率（目標: >99%）
+- [ ] 平均認証時間（目標: <3秒）
+- [ ] エラー発生率（目標: <1%）
+- [ ] 新規ユーザー作成通知
+- [ ] 設定エラー検知
+
+---
+
+## 📚 技術ドキュメント
+
+### **API仕様**
+```typescript
+// SSO設定管理API
+POST   /api/admin/sso/config          // SSO設定保存
+GET    /api/admin/sso/config          // SSO設定取得
+POST   /api/admin/sso/test            // 接続テスト
+GET    /api/admin/sso/users           // SSO作成ユーザー一覧
+
+// SSO認証API  
+GET    /auth/sso/login                // SSO認証開始
+POST   /auth/sso/callback             // Azure ADからのコールバック
+POST   /auth/sso/logout               // ログアウト
+```
+
+### **環境変数**
+```bash
+# Azure AD設定
+AZURE_AD_CLIENT_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+AZURE_AD_CLIENT_SECRET=xxxxxxxxxxxxxxxxxxxx
+
+# SSO設定
+SSO_STATE_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+SSO_CALLBACK_URL=https://your-domain.com/auth/sso/callback
+SSO_SESSION_TIMEOUT=28800  # 8時間（秒）
+```
+
+### **セキュリティチェックリスト**
+- [ ] HTTPS必須設定
+- [ ] State パラメータ検証実装
+- [ ] Nonce検証実装
+- [ ] JWT署名検証実装
+- [ ] セッション固定攻撃対策
+- [ ] クリックジャッキング対策
+- [ ] 設定値暗号化保存
+- [ ] 監査ログ記録
+
+---
+
+## ✅ 成功指標・KPI
+
+### **技術指標**
+- **認証成功率**: > 99.5%
+- **認証レスポンス時間**: < 3秒（95%tile）
+- **システム可用性**: > 99.9%
+- **セキュリティインシデント**: 0件
+
+### **ビジネス指標**
+- **顧客設定完了時間**: < 30分
+- **SSO導入完了率**: > 80%（対象顧客）
+- **サポート問い合わせ**: < 5件/月
+- **顧客満足度**: > 4.5/5.0
+
+### **運用指標**
+- **新規ユーザー自動作成率**: > 95%
+- **手動設定完了時間**: < 1日
+- **設定エラー解決時間**: < 2時間
+- **アップタイム**: > 99.9%
+
+---
+
+## 🎯 まとめ
+
+この仕様書に基づいて実装することで、**中堅企業向けエンタープライズSaaS**として十分な品質と機能を持つSSO機能を提供できます。
+
+**実装の鍵となるポイント:**
+1. **Azure AD + OIDC**による確実な認証基盤
+2. **基本マッピング**による安全なユーザー管理
+3. **ドメインベース識別**による優れたUX
+4. **段階的権限モデル**による運用性確保
+5. **ユーザーフレンドリー**なエラーハンドリング
+
+**競合優位性:**
+- 実装コストを抑制しながらエンタープライズ品質を実現
+- 中堅企業のニーズに最適化された機能範囲
+- 運用負荷を最小限に抑えた設計
+- セキュリティと使いやすさのバランス
+
+この仕様により、**差別化されたSSO機能**を持つ購買管理SaaSとして市場展開が可能になります。
+
+---
+
+**実装開始準備完了** ✅  
+*次は具体的なコード実装に着手いただけます*
