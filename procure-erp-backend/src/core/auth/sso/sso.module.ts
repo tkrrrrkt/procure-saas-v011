@@ -16,6 +16,7 @@ import { TokenBlacklistService } from '../token-blacklist.service';
 // SSO関連のコンポーネント
 import { AzureAdOAuth2Strategy } from './azure-ad/azure-ad-oauth2.strategy'; // OAuth2Strategy実装
 import { AzureAdController } from './azure-ad/azure-ad.controller';
+import { SsoAdminController } from './azure-ad/sso-admin.controller'; // 🆕 SSO管理コントローラー
 import { JitProvisioningService } from './services/jit-provisioning.service';
 import { TenantResolverService } from './services/tenant-resolver.service';
 
@@ -41,6 +42,7 @@ import { TenantResolverService } from './services/tenant-resolver.service';
   ],
   controllers: [
     AzureAdController,
+    SsoAdminController, // 🆕 SSO管理コントローラー
   ],
   providers: [
     // 🆕 既存AuthService（AppModuleでAuthModuleが先にロード済み）

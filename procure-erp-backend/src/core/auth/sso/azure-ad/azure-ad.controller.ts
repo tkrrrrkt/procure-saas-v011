@@ -244,7 +244,9 @@ export class AzureAdController {
 
       // Azure ADの.well-knownエンドポイントに接続テスト
       const tenantId = this.configService.get<string>('AZURE_AD_TENANT_ID');
+      this.logger.log(`デバッグ: 使用中のテナントID = ${tenantId}`);
       const discoveryUrl = `https://login.microsoftonline.com/${tenantId}/v2.0/.well-known/openid_configuration`;
+      this.logger.log(`デバッグ: アクセス先URL = ${discoveryUrl}`);
       
       const axios = require('axios');
       const response = await axios.get(discoveryUrl, { timeout: 10000 });

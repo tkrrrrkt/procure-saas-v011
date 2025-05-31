@@ -19,6 +19,13 @@ export default function LoginPage() {
   const { login } = useAuth()
   const { toast } = useToast()
 
+  // SSO認証開始ハンドラー
+  const handleSsoLogin = () => {
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001/api"
+    console.log("SSO認証開始:", apiUrl)
+    window.location.href = `${apiUrl}/auth/sso/login`
+  }
+
   // ページロード時にURLパラメータをチェック
   React.useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -201,6 +208,32 @@ export default function LoginPage() {
               disabled={isSubmitting}
             >
               {isSubmitting ? "ログイン中..." : "ログイン"}
+            </Button>
+
+            {/* または */}
+            <div className="relative my-6">
+              <div className="absolute inset-0 flex items-center">
+                <span className="w-full border-t" />
+              </div>
+              <div className="relative flex justify-center text-xs uppercase">
+                <span className="bg-background px-2 text-muted-foreground">または</span>
+              </div>
+            </div>
+
+            {/* SSO認証ボタン */}
+            <Button 
+              type="button"
+              onClick={handleSsoLogin}
+              variant="outline" 
+              className="w-full"
+            >
+              <svg className="mr-2 h-4 w-4" viewBox="0 0 24 24">
+                <path fill="currentColor" d="M23.3 12.3c0-.8-.1-1.6-.3-2.3H12v4.4h6.4c-.3 1.5-1.1 2.8-2.3 3.7v3.1h3.7c2.2-2 3.5-5 3.5-8.9z"/>
+                <path fill="currentColor" d="M12 24c3.2 0 5.9-1.1 7.9-2.9l-3.7-3.1c-1.1.7-2.5 1.2-4.2 1.2-3.2 0-5.9-2.2-6.9-5.1H1.4v3.2C3.4 21.4 7.4 24 12 24z"/>
+                <path fill="currentColor" d="M5.1 14.1c-.2-.7-.4-1.4-.4-2.1s.1-1.4.4-2.1V6.7H1.4C.5 8.5 0 10.2 0 12s.5 3.5 1.4 5.3l3.7-3.2z"/>
+                <path fill="currentColor" d="M12 4.8c1.8 0 3.4.6 4.6 1.8l3.5-3.5C18 1.1 15.3 0 12 0 7.4 0 3.4 2.6 1.4 6.7l3.7 3.2c1-2.9 3.7-5.1 6.9-5.1z"/>
+              </svg>
+              Microsoftでログイン
             </Button>
           </form>
         </CardContent>
